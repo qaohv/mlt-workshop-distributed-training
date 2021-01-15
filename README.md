@@ -24,13 +24,13 @@ python main.py --batch-size 96 --use-mixed-precision O1
 ```
 Master node:
 
-python -m torch.distributed.launch --nproc_per_node=1 --nnodes=2 --node_rank=0 --master_addr="10.2.2.19" --master_port=8884 main.py --batch-size 96
+python -m torch.distributed.launch --nproc_per_node=1 --nnodes=2 --node_rank=0 --master_addr="10.2.2.19" --master_port=8884 main.py --batch-size 96 --warmup-epochs 5 --warmup-start-lr 0.01 --lr 0.02
 ```
 
 ```
 Worker node:
 
-python -m torch.distributed.launch --nproc_per_node=1 --nnodes=2 --node_rank=1 --master_addr="10.2.2.19" --master_port=8884 main.py --batch-size 96
+python -m torch.distributed.launch --nproc_per_node=1 --nnodes=2 --node_rank=1 --master_addr="10.2.2.19" --master_port=8884 main.py --batch-size 96 --warmup-epochs 5 --warmup-start-lr 0.01 --lr 0.02
 ```
 
 ### Run single-GPU FP16 distributed training:

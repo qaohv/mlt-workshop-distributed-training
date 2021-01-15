@@ -15,7 +15,26 @@ from torchvision.datasets import CIFAR100
 from torchvision.models import resnet50
 from tqdm import tqdm
 
+from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data.distributed import DistributedSampler
+
+
+class WarmupScheduler(_LRScheduler):
+    def __init__(self, optimizer_, start_lr, finish_lr, warmup_epochs_num, last_epoch=-1):
+        self.start_lr = start_lr
+        self.finish_lr = finish_lr
+        self.warmup_epochs = warmup_epochs_num
+
+        lr_step = (finish_lr - start_lr) / self.warmup_epochs
+        self.lrs = [self.start_lr + lr_step * i for i in range(self.warmup_epochs + 1)]
+
+        super().__init__(optimizer_, last_epoch)
+
+    def get_lr(self):
+        print(f"last epoch: {self.last_epoch}")
+        lr = self.lrs[self.last_epoch] if self.last_epoch + 1 < self.warmup_epochs else self.finish_lr
+        print(f"lr is : {lr})")
+        return [lr]
 
 
 class Resnet50Classifier(torch.nn.Module):
@@ -50,6 +69,8 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=25, help='Number of epochs to train NN.')
     parser.add_argument('--batch-size', type=int, required=True, help='Batch size to train NN.')
     parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate to train NN.')
+    parser.add_argument('--warmup-epochs', type=int, default=0, help='Warmup epochs number')
+    parser.add_argument('--warmup-start-lr', type=float, default=1e-2, help='Warmup low lr bound.')
     parser.add_argument('--use-mixed-precision', type=str, default="O0", choices=["O0", "O1"],
                         help='Disable or enable mixed precision training.')
 
@@ -66,14 +87,21 @@ if __name__ == "__main__":
     device = torch.device(f"cuda:{args.local_rank or 0}")
 
     net = Resnet50Classifier(num_classes=100).to(device)
-    optimizer = torch.optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
+    optimizer = torch.optim.SGD(net.parameters(), lr=args.warmup_start_lr if args.warmup_epochs > 0 else args.lr,
+                                momentum=0.9, weight_decay=1e-4)
+
     net, optimizer = amp.initialize(net, optimizer, opt_level=args.use_mixed_precision)
+
+    # Explain warmup
+    scheduler = None
+    if args.warmup_epochs > 0:
+        scheduler = WarmupScheduler(optimizer, args.warmup_start_lr, args.lr, args.warmup_epochs)
 
     # Dist training
     if dist_training:
-        model = torch.nn.parallel.DistributedDataParallel(net,
-                                                          device_ids=[args.local_rank],
-                                                          output_device=args.local_rank)
+        net = torch.nn.parallel.DistributedDataParallel(net,
+                                                        device_ids=[args.local_rank],
+                                                        output_device=args.local_rank)
 
     criterion = torch.nn.CrossEntropyLoss()
 
@@ -92,8 +120,6 @@ if __name__ == "__main__":
     else:
         train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
 
-    # TODO warmup
-
     epoch_train_loss = []
     for epoch in range(args.epochs):
         start = time.time()
@@ -109,5 +135,10 @@ if __name__ == "__main__":
 
             optimizer.step()
             epoch_train_loss.append(loss.item())
+
         finish = time.time()
+
+        if scheduler is not None:
+            scheduler.step(epoch)
+
         print(f"Epoch: {epoch}, train loss: {np.mean(epoch_train_loss):.5f}, epoch time: {finish - start}")
